@@ -217,6 +217,13 @@ matters:
   If you have seen MyScript output words in a weird order on tilted multi-line input,
   this is probably why.
 
+**Measured live speed** (my Stage, M-series Mac, seven consecutive impressions written at
+arbitrary angles from 76 to 324 degrees, every one detected at confidence 1.00): the
+geometric engine alone answered in 0.11 to 0.21 ms after the first warm-up call, and the
+full hybrid including the Vision tilt-refine pass landed between 167 and 193 ms after pen
+stop. iPhone hardware will be slower on the Vision pass, but the shape holds: the
+orientation answer itself is effectively free, and the polish pass is well under a blink.
+
 Live captures from that Stage session (left = as written, right = after the fix):
 
 !["Are you there", three close cursive lines upside down, rescued by Vision after geometry abstained](docs/live-are-you-there.png)
