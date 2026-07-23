@@ -15,12 +15,11 @@ whatever direction they wrote, and the recognizer has no idea. This is not a cor
 recognizers forgot to handle: MyScript's own staff confirm the engine cannot infer
 orientation, MLKit assumes upright ink, and Apple's Vision requires the caller to supply
 the orientation. Somebody upstream has to rotate the ink upright first. That somebody is
-this file.
+this file, duh! Problem solved! 
 
 The obvious fix is to run recognition in all four directions and keep the best answer.
 That works, but every attempt costs a full recognition pass, and it can only ever snap to
-four directions. I wanted the opposite: read the geometry of the strokes once, compute the
-exact angle, rotate once, recognize once.
+four directions. You had that in the Lumen app, but not Impra. The reason is that it caused too much latency and gave recognition much too delayed.  I wanted the opposite: read the geometry of the strokes once, compute the exact angle, rotate once, recognize once, and do it super quickly so that performers never have to sweat :) .
 
 ## How I built it, start to finish
 
@@ -28,60 +27,59 @@ exact angle, rotate once, recognize once.
 letter sits at its middle, on the text midline, so across a word the centroids line up
 along the baseline no matter how tall or narrow the letters are. A PCA fit of those
 centroids gives me the baseline angle at any angle, not just the four cardinals. That
-leaves four possible readings of that axis (which end is up, which way do you read), so I
-score all four for how much they read like text and keep the winner. Confidence is how far
+leaves four possible readings of that axis (which end is up and which way do you read), so I
+score all four for how much they read like text and keep the winner. Confidence is how much
 the winner beat the runner-up. Low confidence means the geometry genuinely cannot tell, and
-the system says "don't know" instead of guessing, so the app can fall back to a recognition
-retry. I verified this version on my own Lumen Trilogy: a rotation sweep at every 10
-degrees came back 180 for 180, worst case 2 degrees off, zero upside-down flips.
+the system says "I don't know" instead of guessing and getting it wrong. This means the app can fall back to a recognition
+retry. COOL! I verified this version on my own Lumen Trilogy: a rotation sweep at every 10
+degrees came back 180 for 180 on my handwritten tests (and I have bad handwriting lol), worst case 2 degrees off, zero upside-down or sideways flips. 
 
-**Step 2: check my method against the literature.** Before trusting it further I ran a
+**Step 2: check my method against the literature.** Before trusting it further, I ran a
 deep prior-art sweep: published methods for handwriting orientation going back twenty
 years (Nakagawa and Onuma's direction histograms, Leptonica's flip detector, Tesseract's
 orientation voting, dynamic-programming line grouping, skew estimation, and more), with
 every claim verified against its source. The sweep confirmed the architecture: geometric
 pre-rotation feeding a single recognition pass is exactly the contract the recognizers
-expect. It also handed me a shortlist of candidate upgrades.
+expect. It also handed me a shortlist of candidate upgrades. There was SOOO much. Spoiler: nothing does it as well as what I made, that's testable and you can verify that. 
 
 **Step 3: measure everything.** I built a benchmark instead of arguing with myself. Every
-sample gets rotated through all 36 ten-degree steps plus 20 random angles, and the detector
+sample gets rotated through all 36 ten-degree steps (meaning it gets tested every 10 degrees from zero to 360) plus 20 random angles that aren't increments of 10, and the detector
 has to recover the rotation. The test data is 20 real impressions captured from my Trilogy
 plus 600 samples from the DeepWriting handwriting dataset: 300 single words and 300 lone
-characters, which is exactly the short, context-free input a spectator produces. Then I
-implemented every candidate upgrade and let the numbers decide.
+characters, which is exactly the short, context-free unreliable type of input a spectator produces in the real world. Then I
+implemented every candidate upgrade and let the numbers decide. I would charge some serious cash to do this, but hell, I love AWL! So I just hope this helps. Anyway...
 
-**What survived:**
+**What is applied from the research I did:**
 
 - **Pen-direction histogram** (after Nakagawa and Onuma). Pen-down strokes mostly travel
-  down the glyph axis, and pen-up jumps advance along the reading direction. Two
-  histograms, built once, tell you which way is down even for a single glyph with no
-  baseline at all. This is the biggest single upgrade in v3, and at heavy weight it powers
-  the new lone-glyph path.
+  down the glyph axis, and pen-up jumps (lifts) advance along the reading direction. So, there are two
+  histograms, built once, that tell you which way is down even for a single glyph with no
+  baseline at all. This is the single biggest upgrade in v3 of this software I made, and at heavy weight it powers
+  the new lone-glyph (or single character) path.
+  
 - **Projection-profile sharpness.** At the correct rotation, ink collapses into tight
   horizontal bands; at the wrong one it smears. A capped histogram sharpness score captures
   that, and it is strongest exactly where the centroid baseline is weakest: short,
-  square-aspect input.
+  square-aspect input. This is a great find! 
+  
 - **Smarter line clustering.** I replaced my fragile median-height line-gap rule with a
-  robust character-size estimate (Onuma) plus temporal breaks from long pen-up jumps. This
-  alone took real-pad accuracy from 97.2% to 99.4%.
-- **A new lone-glyph rule.** For 1 or 2 strokes there is no baseline, so v3 blends glyph
-  tallness, my start-is-up prior (people begin a 6 and a 9 at the top), and the direction
+  robust character-size estimate (credit to Onuma) plus temporal breaks from long pen-up jumps. This
+  alone took real-pad accuracy from 97.2% to 99.4%. So we are really cooking with heat. 
+  
+- **A new lone-glyph rule.** This was honestly the hardest part. For 1 or 2 strokes there is no baseline, damn.... BUT my v3 of this software blends glyph
+  tallness, my start-is-up prior (people begin a 6 and a 9 at the top for instance), and the direction
   histogram, then fine-nudges the angle from the histogram's down peak. On lone digits this
-  scores 98.5% versus 83.3% for my earlier rule.
+  scores 98.5% versus 83.3% for my earlier rule. 
 
-**What I tested and threw away:** a fine-skew regression stage (zero measured gain),
-Leptonica-style confidence gates (no better than a plain calibrated threshold), the
-DP line-grouping cost (weight tuned itself to zero, slowest feature), an
-ascender-descender up-or-down count (flat), and reading pen tilt off the pad's Bluetooth
-protocol (the packets carry only x, y, and pressure, so there is nothing to read). I also
-removed my own line-stacking term from v2 after the ablation showed it contributed
-nothing. If a term is in this file, it paid for itself on the benchmark; if it is not,
-I measured it and it did not.
+**What I found but threw away, in case you want to look into it:** 
 
-**Step 4: verify, then port.** An independent verification pass re-ran the winning
+a fine-skew regression stage (zero measured gain), Leptonica-style confidence gates (no better than a plain calibrated threshold), the DP line-grouping cost (weight tuned itself to zero, THIS WAS SO SLOW), an ascender-descender up-or-down count (flat), and reading pen tilt off the pad's Bluetooth protocol (the packets carry only x, y, and pressure, so there is nothing to read, no azimuth). 
+I also removed my own line-stacking term from v2 after the testing showed it contributed nothing. It just worked without it anyway. If a term is in this file, it paid for itself on the benchmark; if it is not, I measured it, and it did not.
+
+**Step 4: verify, then port.** I had an independent verification pass re-run the winning
 configuration from scratch on fresh data and reproduced every number before I accepted it.
 This Swift file was then checked against the reference implementation on 260 test cases,
-matching to floating-point precision.
+matching to some really impressive precision. 
 
 ## The numbers
 
@@ -136,17 +134,19 @@ export (`text.words` and `text.chars`) so the retry has ranks to compare. In MLK
 `WritingArea` per line in the rotated frame and the previous line as `preContext`. None of
 that is part of this file, but if you are integrating this, do those too.
 
-## Honest limits
+## Honest limits IMPORTANT TO READ! I CAN HELP FIX THESE IF YOU ASK ME TO!
 
 - **Diagonal underlines.** I drop underlines and box edges before fitting, but the filter
   only catches them reliably when they arrive near-horizontal or near-vertical. A long
   underline at a diagonal still hurts accuracy. I tried the obvious rotation-invariant fix
   and the benchmark rejected it (it started eating legitimate strokes), so this stays an
   open item.
+  
 - **Lone letters** are the hardest input there is (53% four-way). Lone digits are strong,
   and multi-character input is unambiguous, but a single letter with no context is
   genuinely ambiguous even to a human reading rotated ink. The abstain flag and the retry
   carry this case.
+  
 - **Unusual stroke order.** The lone-glyph path leans on people starting glyphs near the
   top. Someone who draws a 6 bottom-up can still fool it; the direction histogram usually
   catches it now, but it is a strong aid, not a guarantee.
