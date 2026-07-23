@@ -12,6 +12,10 @@ pass. No recognition search.
 This is v3. Everything in it earned its place on a benchmark, and I removed the parts of my
 own earlier method that the benchmark proved were dead weight. The full story is below.
 
+**Update 2026-07-23:** there is now a second engine, built on Apple's Vision framework,
+aimed squarely at the close-two-line and cursive cases Shamir hit in testing. Jump to
+[the Apple Vision engine](#new-the-apple-vision-engine-visiontextorientationswift).
+
 ## The problem I set out to solve
 
 A spectator writes on the pad from wherever they are standing. The strokes arrive in
@@ -102,6 +106,78 @@ v3 is unsure it abstains rather than guessing, and abstained input goes to the r
 described below, so a wrong-but-confident answer is rare: on short words, decided output
 flips 180 degrees only 1.2% of the time, versus 5.1% for v2.
 
+## NEW: the Apple Vision engine (VisionTextOrientation.swift)
+
+Shamir, this one is for the cases you showed me: two words written close together on two
+lines (your John / Doe example), cursive, and diagonal writing. Those are exactly where my
+geometric line clustering is weakest, so instead of patching it I added a second engine
+that attacks the problem from the other side, and you can A/B them in the app.
+
+**How it works.** It renders the strokes to an offscreen image and hands them to Apple's
+on-device text recognizer (the Vision framework, nothing leaves the device). Here is the
+part that surprised me, and I measured it rather than assumed it: Vision does NOT care
+which way the text is rotated. It will read upside-down ink at full confidence, so the
+obvious "try 4 rotations, keep the most confident" design does not work at all (I built it
+first and it scored 15%, lol). What DOES work: Vision tells you WHERE the text it read
+starts and ends. The box it returns around each read line is directed, its top-left corner
+sits at the start of the text wherever that lands in the image. So one read gives you the
+true reading direction as a continuous angle, upside down, diagonal, whatever. I probe a
+few rotations anyway, cluster the answers, and let the heaviest cluster win so one garbage
+read cannot hijack the result. Per-character boxes, in case you go looking: useless for
+handwriting, Vision returns the whole-line box for every character. Measured that too.
+
+**Why this fixes your two cases.** Vision segments the ink into lines ITSELF, and it is
+very good at it. So two words crammed close together stop depending on my line clustering
+entirely. And cursive is Vision's home turf, it was trained on far more handwriting than
+any geometric rule will ever encode.
+
+**The numbers** (same rotate-and-score harness as everything else in this README; the
+two-line set is 30 trials built from real pad impressions stacked with a tight line gap,
+including diagonal rotations like your photo):
+
+| Test set | Geometric v3 | Vision engine | Hybrid |
+|---|---|---|---|
+| Close two-line, when it answers | 26/26 | 23/23 | 28/28 |
+| Close two-line, abstains | 4 of 30 | 7 of 30 | 2 of 30 |
+| Close two-line, median angle error | 8.8 deg | 3.7 deg | 3.7 deg |
+| Full pad sweep (160 trials), decided accuracy | 100% | 84% | 88% |
+| Runtime per call | under 1 ms | ~200 ms | 0 ms easy / ~200 ms hard |
+
+Read that table honestly: the geometric engine is still king on speed and never decides
+wrong on the pad set, but it abstains a lot on the hard cases. The Vision engine answers
+the close-two-line and diagonal cases more precisely and more often. Its pad-sweep misses
+are all on two impressions that are pure scribble, unreadable at ANY angle by a human, and
+there Vision confidently picks a diagonal it likes. On scribble the "right" answer barely
+means anything, but that is the trade: Vision can be confidently wrong on non-text ink
+where geometry would abstain.
+
+**So which do you ship?** `detectHybrid`. Geometry answers instantly when it is sure
+(that was 99.5% of normal writing), and Vision referees only the cases geometry flags as
+unsure, which are exactly your John / Doe and cursive cases. Worst case cost is one
+~200 ms Vision pass on an impression that was about to be recognized wrong anyway.
+
+```swift
+// Somewhere off the main thread:
+let result = VisionTextOrientation.detectHybrid(strokes)
+if !result.abstain {
+    let upright = TextOrientation.apply(strokes, rotation: result.radians)
+    // -> MyScript / MLKit, same as before
+}
+// result.path tells you which engine decided: "text"/"glyph" = geometry, "vision" = Vision.
+```
+
+Pure Vision, if you want to A/B it alone: `VisionTextOrientation.detect(strokes)`.
+Options let you set probe angles, recognition level, languages, and abstain thresholds.
+Both Swift files need to be in the target together. iOS 14+, no dependencies, offline.
+This one is Apple-only though: for the Android build the geometric engine is still the
+answer (it is pure math and ports anywhere).
+
+Your John / Doe case, reconstructed on my real pad data (two close lines, written at a
+diagonal), before and after the Vision engine:
+
+![two close lines as written](docs/twoline-before.png)
+![two close lines after the Vision engine](docs/twoline-after-vision.png)
+
 ## Usage
 
 ```swift
@@ -139,6 +215,12 @@ export (`text.words` and `text.chars`) so the retry has ranks to compare. In MLK
 that is part of this file, but if you are integrating this, do those too.
 
 ## Honest limits IMPORTANT TO READ! I CAN HELP FIX THESE IF YOU ASK ME TO!
+
+These limits are about the GEOMETRIC engine. The Vision engine above now covers the two
+worst ones in practice (close lines and cursive) when you use `detectHybrid`. Additions
+for the Vision engine itself: it costs ~200 ms when it fires, it is Apple-platform only,
+and on ink that is not really text (pure scribble) it can confidently pick a wrong angle
+where the geometry would have abstained.
 
 - **Diagonal underlines.** I drop underlines and box edges before fitting, but the filter
   only catches them reliably when they arrive near-horizontal or near-vertical. A long
