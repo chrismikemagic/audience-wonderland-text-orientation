@@ -2,6 +2,8 @@
 
 🎧 **Prefer to listen?** [Audio version of this README, read by me (9 min)](docs/readme-audio.m4a)
 
+📊 **The headline result:** 99.5% correct orientation on real pad writing, tested across every angle (1,120 trials), and 98.5% on lone digits like a 6 vs a 9. Full breakdown in [The numbers](#the-numbers).
+
 Detect the angle a person wrote at on an impression pad, and return the strokes rotated
 upright, ready to feed a recognizer such as MyScript iink. It handles any angle, tall or
 short letters, cursive, all caps, lone digits, and multiple lines, in a single geometric
