@@ -1,5 +1,7 @@
 # Audience Wonderland Text Orientation
 
+🎧 **Prefer to listen?** [Audio version of this README, read by me (9 min)](docs/readme-audio.m4a)
+
 Detect the angle a person wrote at on an impression pad, and return the strokes rotated
 upright, ready to feed a recognizer such as MyScript iink. It handles any angle, tall or
 short letters, cursive, all caps, lone digits, and multiple lines, in a single geometric
