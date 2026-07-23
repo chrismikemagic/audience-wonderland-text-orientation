@@ -133,17 +133,92 @@ public enum VisionTextOrientation {
     /// the two engines are cheap to cross-check and disagree. Best default for
     /// the app: fast on the easy cases, robust on close lines, cursive, and
     /// diagonals.
+    ///
+    /// `refineTilt` (default on) spends ONE extra Vision pass after a confident
+    /// geometric answer to flatten residual tilt: rotate by the coarse answer,
+    /// read once, and the leftover angle of the text Vision sees is subtracted
+    /// out. Live pad testing showed geometry regularly lands the right quadrant
+    /// but 15-30 degrees tilted on cursive, which is exactly the range where
+    /// MyScript starts to struggle; one refinement pass takes the output to
+    /// near-flat. Turn it off if you need the pure sub-millisecond path.
     public static func detectHybrid(_ strokes: [Stroke],
-                                    geometryConfidenceFloor: Double = 0.55,
+                                    geometryConfidenceFloor: Double = 0.70,
+                                    refineTilt: Bool = true,
                                     options: Options = Options()) -> OrientationResult {
         let geo = TextOrientation.detect(strokes)
-        if !geo.abstain && geo.confidence >= geometryConfidenceFloor { return geo }
+        if !geo.abstain && geo.confidence >= geometryConfidenceFloor {
+            return refineTilt ? refined(geo, strokes: strokes, options: options) : geo
+        }
 
         let vis = detect(strokes, options: options)
         if !vis.abstain { return vis }
-        if !geo.abstain { return geo }
+        if !geo.abstain {
+            return refineTilt ? refined(geo, strokes: strokes, options: options) : geo
+        }
         // Both unsure; surface whichever was less lost, keep the abstain flag up.
         return vis.confidence >= geo.confidence ? vis : geo
+    }
+
+    /// One Vision pass on the coarse-rotated ink; snaps the answer to what the
+    /// recognizer actually sees when they agree on the quadrant (<= 40 deg apart).
+    private static func refined(_ coarse: OrientationResult, strokes: [Stroke], options: Options) -> OrientationResult {
+        let estimates = probe(strokes, angles: [coarse.degrees], options: options)
+        var sx = 0.0, sy = 0.0, w = 0.0
+        for e in estimates where angularDistance(e.correctionDeg, coarse.degrees) <= 40 {
+            let r = e.correctionDeg * .pi / 180
+            sx += cos(r) * e.weight; sy += sin(r) * e.weight; w += e.weight
+        }
+        guard w >= 0.3 else { return coarse }   // nothing readable: keep geometry
+        var deg = atan2(sy, sx) * 180 / .pi
+        if deg < 0 { deg += 360 }
+        return OrientationResult(radians: deg * .pi / 180,
+                                 degrees: deg,
+                                 confidence: max(coarse.confidence, min(1.0, w)),
+                                 abstain: false,
+                                 lineCount: max(coarse.lineCount, estimates.map(\.lineCount).max() ?? 0),
+                                 path: coarse.path + "+refine")
+    }
+
+    // MARK: - Recognition readback
+
+    /// What the on-device recognizer can read in the ink AS GIVEN, plus how
+    /// confidently. Rotate first, then call this, and you have a direct measure
+    /// of how recognizable the writing is at that orientation. Vision is not
+    /// MyScript, but on handwriting they struggle with the same things, so this
+    /// is an honest proxy for "will recognition work", and it runs offline.
+    public struct Readback {
+        public let text: String          // lines joined top to bottom with newlines
+        public let confidence: Double    // 0..1 weighted mean of per-line confidence
+        public let lineCount: Int
+    }
+
+    public static func readback(_ strokes: [Stroke], options: Options = Options()) -> Readback {
+        let clean = strokes.filter { !$0.isEmpty }
+        guard !clean.isEmpty, let image = rasterize(clean, longSide: options.rasterLongSide) else {
+            return Readback(text: "", confidence: 0, lineCount: 0)
+        }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = options.recognitionLevel
+        request.usesLanguageCorrection = options.usesLanguageCorrection
+        request.recognitionLanguages = options.recognitionLanguages
+        let handler = VNImageRequestHandler(cgImage: image, orientation: .up, options: [:])
+        do { try handler.perform([request]) } catch { return Readback(text: "", confidence: 0, lineCount: 0) }
+
+        var lines: [(y: Double, text: String, conf: Double, len: Int)] = []
+        for obs in request.results ?? [] {
+            guard let top = obs.topCandidates(1).first else { continue }
+            let t = top.string.trimmingCharacters(in: .whitespaces)
+            guard !t.isEmpty else { continue }
+            let midY = (Double(obs.topLeft.y) + Double(obs.bottomRight.y)) / 2
+            lines.append((midY, t, Double(top.confidence), t.count))
+        }
+        guard !lines.isEmpty else { return Readback(text: "", confidence: 0, lineCount: 0) }
+        lines.sort { $0.y > $1.y }   // normalized y is up; top of image first
+        let totalLen = lines.reduce(0) { $0 + $1.len }
+        let conf = lines.reduce(0.0) { $0 + $1.conf * Double($1.len) } / Double(max(1, totalLen))
+        return Readback(text: lines.map(\.text).joined(separator: "\n"),
+                        confidence: conf,
+                        lineCount: lines.count)
     }
 
     // MARK: - Probing

@@ -163,7 +163,8 @@ if !result.abstain {
     let upright = TextOrientation.apply(strokes, rotation: result.radians)
     // -> MyScript / MLKit, same as before
 }
-// result.path tells you which engine decided: "text"/"glyph" = geometry, "vision" = Vision.
+// result.path tells you which engine decided: "text"/"glyph" = geometry (with
+// "+refine" if the tilt pass adjusted it), "vision" = Vision.
 ```
 
 Pure Vision, if you want to A/B it alone: `VisionTextOrientation.detect(strokes)`.
@@ -177,6 +178,50 @@ diagonal), before and after the Vision engine:
 
 ![two close lines as written](docs/twoline-before.png)
 ![two close lines after the Vision engine](docs/twoline-after-vision.png)
+
+### Tilt refinement and recognition readback (added same day, after live pad testing)
+
+I then spent an afternoon writing on my own Stage with all of this running live, and the
+testing exposed one more real weakness plus the fix for it. The quadrant was almost always
+right, but on cursive and diagonal writing the geometric answer regularly landed 15 to 30
+degrees tilted, and tilted ink is exactly where recognizers start dropping letters and
+scrambling which line is first.
+
+So `detectHybrid` now finishes with a **tilt refinement pass** (on by default, `refineTilt:
+false` to disable): rotate by the coarse answer, hand the result to Vision ONCE, and
+whatever small angle the read text still sits at gets subtracted out. It only trusts the
+adjustment when Vision actually read something and agrees with the quadrant, so pure
+scribble stays untouched instead of getting "corrected" into nonsense. Measured cost on my
+machine: about 50 ms. The confidence floor for skipping Vision entirely also moved from
+0.55 to 0.70 after a live case squeaked past the old floor at 0.56 and kept an 18 degree
+tilt that Vision would have flattened.
+
+There is also a new **`readback` API** so you can measure recognition quality instead of
+guessing at it:
+
+```swift
+let before = VisionTextOrientation.readback(strokes)          // what OCR reads as written
+let after  = VisionTextOrientation.readback(upright)          // what OCR reads after the fix
+// .text (lines top to bottom), .confidence 0..1, .lineCount
+```
+
+Vision is not MyScript, but they trip over the same things, so this is an honest offline
+proxy for "will recognition work". Two live results from my Stage that show why this
+matters:
+
+- "Hello" written at roughly 132 degrees, an angle nowhere near a 90 snap: OCR read `elo`
+  as written, `HellO` at full confidence after the fix. Same ink, same recognizer, the
+  only change was orientation.
+- "Chris Michael" upside down on two close lines: as written, OCR read the lines in the
+  WRONG ORDER ("michael" line first). After the fix it reads top to bottom correctly.
+  If you have seen MyScript output words in a weird order on tilted multi-line input,
+  this is probably why.
+
+Live captures from that Stage session (left = as written, right = after the fix):
+
+!["Are you there", three close cursive lines upside down, rescued by Vision after geometry abstained](docs/live-are-you-there.png)
+!["Chris Michael", upside down diagonal, two close lines, geometry + tilt refine](docs/live-chris-michael.png)
+!["Hello" at 132 degrees, tilt refine makes OCR go from elo to HellO](docs/live-hello-132.png)
 
 ## Usage
 
