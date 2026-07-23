@@ -224,6 +224,30 @@ full hybrid including the Vision tilt-refine pass landed between 167 and 193 ms 
 stop. iPhone hardware will be slower on the Vision pass, but the shape holds: the
 orientation answer itself is effectively free, and the polish pass is well under a blink.
 
+**Extended live validation (same day, second and third Stage sessions).** After shipping
+the hybrid I kept testing live for another few hours while running recognition
+experiments on top of it, which means the orientation engine got stress tested on roughly
+forty more real impressions as a side effect, at every angle and every level of
+sloppiness I could produce. Results worth knowing:
+
+- Zero orientation failures across those sessions on readable input. That includes the
+  documented weak spots: two and three lines packed close together, deliberate diagonal
+  writing at 62, 82, 143, 156, 201, 207, 228, 310 degrees, and heavily overlapping words
+  written on top of each other.
+- Single-continuous-stroke cursive (a whole word in one pen stroke, like a signature) is
+  a case the GEOMETRIC engine genuinely cannot handle: with one stroke there are no
+  centroids to fit, and its confidence correctly collapses (0.06 to 0.36 in my tests).
+  The hybrid handoff caught every one of these and the Vision engine oriented them all
+  correctly. If you A/B the geometric engine alone, expect misses on exactly this input;
+  with `detectHybrid` it is covered.
+- Ink that is upside down AND has lines overlapping each other still orients correctly
+  even when it is too messy for any recognizer to transcribe. Orientation quality and
+  recognition quality fail independently, so do not judge the rotation by whether the
+  text read back correctly.
+- One honest miss all day: a lone two-letter word ("Hi") early in testing, before the
+  tilt-refine pass existed. Two-letter input remains the hardest case, consistent with
+  the benchmark's lone-glyph numbers.
+
 Live captures from that Stage session (left = as written, right = after the fix):
 
 !["Are you there", three close cursive lines upside down, rescued by Vision after geometry abstained](docs/live-are-you-there.png)
