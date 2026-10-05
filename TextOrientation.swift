@@ -23,7 +23,11 @@
 //       proj      sharpness of the rotated-y projection profile (capped Postl)
 //     Line clustering uses a robust character-size estimate (Onuma) plus
 //     temporal pen-up jump breaks, instead of a fragile median-height gap.
-//   - LONE-GLYPH path (1-2 strokes, e.g. a single digit): tall + start-up +
+//   - JOINED-WORD path (1-2 strokes that oscillate like a word: cursive, or a
+//     word written without lifting the pen). Wide + ink advancing rightward
+//     over time. Added 2026-10-05: before it, the lone-glyph rule's "keep it
+//     tall" prior turned joined cursive words sideways (cursive 21% -> 75%).
+//   - LONE-GLYPH path (other 1-2 strokes, e.g. a single digit): tall + start-up +
 //     dirhist blend, then a fine nudge from the histogram's down peak. Resolves
 //     the natural-writing 6-vs-9 case (98.5% on lone digits in the benchmark).
 //   - Confidence is the calibrated winning margin. abstain == true means the
@@ -58,7 +62,7 @@ public struct OrientationResult {
     public let abstain: Bool
     /// Number of well-formed text lines detected (1 = single line or lone glyph).
     public let lineCount: Int
-    /// Which internal path decided: "text", "glyph", or "degenerate".
+    /// Which internal path decided: "text", "word", "glyph", or "degenerate".
     public let path: String
 }
 
@@ -85,6 +89,17 @@ private enum K {
     static let gConfGain = 2.5
     static let gAbstainConf = 0.10
     static let gUseRefine = true
+
+    // Joined-word gate + blend (2026-10-05)
+    static let jwMinAspect = 1.3
+    static let jwMinOsc = 3          // 2 routes real pad digit pairs here (pad 99.5% -> 89.5%)
+    static let jwMinProgress = 0.5
+    static let jwHystV = 0.25        // reversal hysteresis, x minor extent
+    static let jwHystU = 0.08        // ... floor, x major extent (kills jitter on thin ink)
+    static let jwHoriz = 0.45
+    static let jwRead = 0.55
+    static let jwConfGain = 2.5
+    static let jwAbstainConf = 0.10
 
     // Underline filter
     static let underThin = 0.08
@@ -161,7 +176,29 @@ public enum TextOrientation {
         let cands = (0..<4).map { -(baseAxis + Double($0) * .pi / 2) }
         let dh = DirHist(strokes)
 
-        // ---------------- lone-glyph path (1-2 core strokes)
+        // ---------------- joined-word path (1-2 core strokes that form a word)
+        if core.count <= 2 && isJoinedWord(core, corePts, axis: baseAxis) {
+            var ranked: [(Double, Double)] = []
+            for rot in cands {
+                let c = cos(rot), s = sin(rot)
+                let xs = corePts.map { $0.x * c - $0.y * s }
+                let ys = corePts.map { $0.x * s + $0.y * c }
+                let xspan = xs.max()! - xs.min()!, yspan = ys.max()! - ys.min()!
+                let xr = xspan == 0 ? 1.0 : xspan
+                let yr = yspan == 0 ? 1.0 : yspan
+                let horiz = xr / (xr + yr)
+                let read = 0.5 + 0.5 * timeCorr(xs)   // ink advances rightward in time
+                ranked.append((K.jwHoriz * horiz + K.jwRead * read, rot))
+            }
+            ranked.sort { $0.0 != $1.0 ? $0.0 > $1.0 : $0.1 > $1.1 }
+            let rot = ranked[0].1
+            let conf = max(0.0, min(1.0, K.jwConfGain * (ranked[0].0 - ranked[1].0)))
+            return OrientationResult(radians: rot, degrees: pymod(rot * 180 / .pi, 360),
+                                     confidence: conf, abstain: conf < K.jwAbstainConf,
+                                     lineCount: 1, path: "word")
+        }
+
+        // ---------------- lone-glyph path (other 1-2 core strokes)
         if core.count <= 2 {
             var ranked: [(Double, Double)] = []
             for rot in cands {
@@ -271,6 +308,50 @@ public enum TextOrientation {
         let root = (((sxx - syy)/2)*((sxx - syy)/2) + sxy*sxy).squareRoot()
         let l1 = (sxx + syy)/2 + root, l2 = (sxx + syy)/2 - root
         return (theta, (l1 - l2) / (l1 + l2 + 1e-9))
+    }
+
+    /// True when 1-2 strokes oscillate like a written word rather than a glyph:
+    /// elongated, at least `jwMinOsc` significant reversals across the major
+    /// axis, and steady progress along it over time.
+    private static func isJoinedWord(_ core: [Stroke], _ pts: [StrokePoint], axis: Double) -> Bool {
+        let c = cos(axis), s = sin(axis)
+        let u = pts.map { $0.x * c + $0.y * s }
+        let v = pts.map { -$0.x * s + $0.y * c }
+        let U = u.max()! - u.min()!, V = v.max()! - v.min()!
+        guard U > 1e-9, V > 1e-9, U / V >= K.jwMinAspect else { return false }
+        let h = max(K.jwHystV * V, K.jwHystU * U)
+        var osc = 0
+        for st in core {
+            var ref = -st[0].x * s + st[0].y * c
+            var dir = 0
+            for p in st.dropFirst() {
+                let q = -p.x * s + p.y * c
+                if dir >= 0 && q < ref - h {
+                    if dir != 0 { osc += 1 }
+                    dir = -1; ref = q
+                } else if dir <= 0 && q > ref + h {
+                    if dir != 0 { osc += 1 }
+                    dir = 1; ref = q
+                } else if (dir == 1 && q > ref) || (dir == -1 && q < ref) {
+                    ref = q
+                }
+            }
+        }
+        guard osc >= K.jwMinOsc else { return false }
+        return abs(timeCorr(u)) >= K.jwMinProgress
+    }
+
+    /// Pearson correlation of values against their index (time order).
+    private static func timeCorr(_ vals: [Double]) -> Double {
+        let n = vals.count
+        guard n >= 2 else { return 0 }
+        let mt = Double(n - 1) / 2, mv = vals.reduce(0, +) / Double(n)
+        var sxy = 0.0, sxx = 0.0, syy = 0.0
+        for (i, v) in vals.enumerated() {
+            let dt = Double(i) - mt, dv = v - mv
+            sxy += dt * dv; sxx += dt * dt; syy += dv * dv
+        }
+        return syy > 0 ? sxy / (sxx * syy).squareRoot() : 0
     }
 
     /// Long, nearly straight, thin, axis-aligned stroke = underline / box edge.

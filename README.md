@@ -16,6 +16,11 @@ own earlier method that the benchmark proved were dead weight. The full story is
 aimed squarely at the close-two-line and cursive cases Shamir hit in testing. Jump to
 [the Apple Vision engine](#new-the-apple-vision-engine-visiontextorientationswift).
 
+**Update 2026-10-05:** cursive fix in the geometric engine. A cursive word written
+without lifting the pen used to come out sideways (21% correct, worse than a coin flip
+on four sides lol). Now it is 75 to 80%, and when it is confident it is basically never
+wrong. Jump to [the cursive fix](#update-2026-10-05-the-cursive-fix).
+
 ## The problem I set out to solve
 
 A spectator writes on the pad from wherever they are standing. The strokes arrive in
@@ -99,6 +104,18 @@ Four-way accuracy across the full rotation sweep, v3 versus my previous version:
 | Single handwritten words (DeepWriting, 300) | 67.1% | 72.7% |
 | Lone characters (DeepWriting, 300) | 43.4% | 53.4% |
 | Lone digits | 83.3% | 98.5% |
+
+After the 2026-10-05 cursive fix (same harness, v3 before vs after):
+
+| Test set | v3 before | v3 now |
+|---|---|---|
+| Real pad impressions | 99.5% | 99.5% (unchanged) |
+| Single handwritten words (300) | 72.7% | 85.5% |
+| Single words, held-out set never tuned on (300) | 73.2% | 87.6% |
+| Joined cursive words (300) | 21.4% | 75.4% |
+| Joined cursive, held-out (300) | 22.6% | 79.8% |
+| Lone characters (300) | 53.4% | 57.1% |
+| Printed words, separate letters (300) | 95.7% | 95.7% (unchanged) |
 
 Upside-down flips dropped on every set (lone characters: 22% down to 13%). Runtime is
 about 0.6 ms per detection in pure Python on a laptop; this Swift version is faster. When
@@ -254,6 +271,47 @@ Live captures from that Stage session (left = as written, right = after the fix)
 !["Chris Michael", upside down diagonal, two close lines, geometry + tilt refine](docs/live-chris-michael.png)
 !["Hello" at 132 degrees, tilt refine makes OCR go from elo to HellO](docs/live-hello-132.png)
 
+## Update 2026-10-05: the cursive fix
+
+I went back and asked a simple question: is it actually true that people make more
+downward strokes than upward ones? My whole direction histogram leans on it. So I
+measured it on about 24,000 handwritten words. For printed writing, yes, big time: 66% of
+the pen's vertical travel goes down and 77% of strokes end lower than they start. For
+cursive, it is way weaker, 52% down, because the pen never lifts and every downstroke
+gets paired with a connecting upstroke. Downstrokes are still steeper though (about 60
+degrees vs 45 for the connectors).
+
+Then I built a cursive test set and ran the detector on it. That is where I found the real
+bug: 21% correct. The issue was not the histogram at all. A cursive word written in one
+or two strokes was going down my lone-glyph path, the one built for a single 6 or 9, and
+that path's "keep it tall" rule was standing the whole word up on its end. Sideways. Every
+time. Dude.
+
+**The fix is a new joined-word path.** When ink is only 1 or 2 strokes, I now check if it
+behaves like a word instead of a character: it is stretched out (1.3x longer than wide or
+more), the pen swings back and forth across it at least 3 times, and it moves steadily
+along its length over time. If so, it gets oriented like a word: wide, and read in the
+direction the pen traveled. Otherwise it goes to the lone-glyph rule exactly like before.
+This routes 57% or more of joined cursive and only about 5% of lone characters, and zero
+of my real pad digits.
+
+What I tested and threw away this round, so you do not have to: counting only the steep
+strokes in the down vs up vote (sounded smart after the research, but it raised upside
+down flips on real pad writing from 0.5% to 1.9%), and adding the histogram or the tilt
+nudge to the new word path (zero gain, so it is not in there).
+
+Proof it is not just tuned to the test: on held-out cursive it was never tuned on, 22.6%
+became 79.8%. I also replayed all 45 impressions from my live Stage sessions in July. 41
+came out identical, and the 4 that changed were all fixes: "hello" twice, "Chris", and
+"haiku", all single stroke cursive that the old version had sideways (Vision was rescuing
+those before). The Swift file matches the Python reference on 365 test cases.
+
+**What this means for `detectHybrid`:** confident word-path answers (confidence 0.70 or
+more, the point where the hybrid skips Vision) were 99.4 to 100% correct on cursive and
+words. So joined cursive now gets answered in under a millisecond instead of waiting
+about 200 ms on Vision. Ink the word path is not sure about still goes to Vision like
+before. Results now report `path == "word"` when this path decided.
+
 ## Usage
 
 ```swift
@@ -304,11 +362,16 @@ where the geometry would have abstained.
   and the benchmark rejected it (it started eating legitimate strokes), so this stays an
   open item.
   
-- **Lone letters** are the hardest input there is (53% four-way). Lone digits are strong,
+- **Lone letters** are the hardest input there is (57% four-way). Lone digits are strong,
   and multi-character input is unambiguous, but a single letter with no context is
   genuinely ambiguous even to a human reading rotated ink. The abstain flag and the retry
   carry this case.
   
+- **Lone letters that look like words.** A single "m" or "w" can trip the joined-word
+  check (about 5% of lone characters). When that happens and the word path is
+  confident, it is right about 79% of the time, which is better than the glyph rule
+  did on those same letters, but it is not perfect.
+
 - **Unusual stroke order.** The lone-glyph path leans on people starting glyphs near the
   top. Someone who draws a 6 bottom-up can still fool it; the direction histogram usually
   catches it now, but it is a strong aid, not a guarantee.
