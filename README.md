@@ -312,6 +312,13 @@ words. So joined cursive now gets answered in under a millisecond instead of wai
 about 200 ms on Vision. Ink the word path is not sure about still goes to Vision like
 before. Results now report `path == "word"` when this path decided.
 
+The full write-up, the published research on stroke direction, my measurements, and the
+before/after captures from my Stage are in
+[docs/stroke-direction-research.md](docs/stroke-direction-research.md). The script that
+produces the numbers is [tools/measure_stroke_direction.py](tools/measure_stroke_direction.py).
+
+![live cursive impressions, old answer on the left, new on the right](docs/live-cursive-fix.png)
+
 ## Usage
 
 ```swift
