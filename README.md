@@ -12,6 +12,8 @@ pass. No recognition search.
 This is v3. Everything in it earned its place on a benchmark, and I removed the parts of my
 own earlier method that the benchmark proved were dead weight. The full story is below.
 
+🧪 **Try it on your own pad:** the [tester](tester/README.md) connects to a Lumen pad from a Mac, turns every impression upright, times it, and reads it back. One command: `tester/run.sh`. Using Claude Code or Codex? Point it at [tester/AGENT.md](tester/AGENT.md).
+
 **Update 2026-07-23:** there is now a second engine, built on Apple's Vision framework,
 aimed squarely at the close-two-line and cursive cases Shamir hit in testing. Jump to
 [the Apple Vision engine](#new-the-apple-vision-engine-visiontextorientationswift).
